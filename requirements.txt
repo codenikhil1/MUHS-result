@@ -1,0 +1,5 @@
+requests>=2.31.0
+rich>=13.0.0
+plyer>=2.1.0
+flask>=3.0.0
+gunicorn>=21.0.0
