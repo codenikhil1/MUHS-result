@@ -35,10 +35,16 @@ DB_PATH    = os.environ.get("DB_PATH",    "registrations.db")
 POLL_INTERVAL = 120  # seconds
 
 URLS = [
+    # HTTPS variants
     "https://centres.muhs.edu.in/Vf$ato/JR/MX1/ug_res/S26/ug_result_S26.aspx",
     "https://centres.muhs.edu.in/Vf$ato/JR/MX1/ug_res/s26/ug_result_s26.aspx",
     "https://centres.muhs.edu.in/Vf$ato/JR/MX1/ug_res/W26/ug_result_W26.aspx",
     "https://centres.muhs.edu.in/Vf$ato/JR/MX1/ug_res/w26/ug_result_w26.aspx",
+    # HTTP fallbacks (MUHS servers sometimes only serve HTTP)
+    "http://centres.muhs.edu.in/Vf$ato/JR/MX1/ug_res/S26/ug_result_S26.aspx",
+    "http://centres.muhs.edu.in/Vf$ato/JR/MX1/ug_res/s26/ug_result_s26.aspx",
+    "http://centres.muhs.edu.in/Vf$ato/JR/MX1/ug_res/W26/ug_result_W26.aspx",
+    "http://centres.muhs.edu.in/Vf$ato/JR/MX1/ug_res/w26/ug_result_w26.aspx",
 ]
 
 HEADERS = {
@@ -249,7 +255,8 @@ def fetch_result_for_prn(base_url: str, prn: str) -> str:
 
 def send_result_email(to_email: str, prn: str, live_url: str, result_text: str) -> bool:
     if not SMTP_USER or not SMTP_PASS:
-        log.warning("SMTP not configured — cannot send email to %s", to_email)
+        log.error("SMTP NOT CONFIGURED — SMTP_USER='%s' SMTP_PASS='%s' — email to %s skipped",
+                  SMTP_USER or "MISSING", "SET" if SMTP_PASS else "MISSING", to_email)
         return False
 
     subject = f"🎉 MUHS UG 2026 Result — PRN {prn}"
@@ -348,6 +355,8 @@ def send_result_email(to_email: str, prn: str, live_url: str, result_text: str) 
 def send_registration_confirmation(to_email: str, prn: str) -> None:
     """Send a 'you are registered' confirmation email."""
     if not SMTP_USER or not SMTP_PASS:
+        log.error("SMTP NOT CONFIGURED — confirmation email to %s skipped. "
+                  "Set SMTP_USER and SMTP_PASS env vars in Railway.", to_email)
         return
     try:
         subject = "✅ MUHS Result Notifier — You're registered!"
@@ -724,13 +733,89 @@ def register():
 def status():
     """Simple JSON status endpoint."""
     return jsonify({
-        "results_live":  _state["results_live"],
-        "live_url":      _state["live_url"],
-        "total_checks":  _state["total_checks"],
-        "last_check":    _state["last_check"].isoformat() if _state["last_check"] else None,
-        "start_time":    _state["start_time"].isoformat(),
+        "results_live":   _state["results_live"],
+        "live_url":       _state["live_url"],
+        "total_checks":   _state["total_checks"],
+        "last_check":     _state["last_check"].isoformat() if _state["last_check"] else None,
+        "start_time":     _state["start_time"].isoformat(),
         "uptime_seconds": int((datetime.now() - _state["start_time"]).total_seconds()),
+        "smtp_configured": bool(SMTP_USER and SMTP_PASS),
+        "smtp_user":       SMTP_USER or "NOT SET",
     })
+
+
+@app.route("/test-email")
+def test_email():
+    """Send a test email to verify SMTP works. Pass ?key=ADMIN_KEY&to=email@example.com"""
+    key = request.args.get("key", "")
+    if key != ADMIN_KEY:
+        return jsonify({"error": "Access denied. Pass ?key=YOUR_ADMIN_KEY"}), 403
+
+    to = request.args.get("to", "")
+    if not to:
+        return jsonify({"error": "Pass ?to=your@email.com"}), 400
+
+    if not SMTP_USER or not SMTP_PASS:
+        return jsonify({
+            "error": "SMTP not configured",
+            "smtp_user": SMTP_USER or "MISSING",
+            "smtp_pass": "SET" if SMTP_PASS else "MISSING",
+            "fix": "Set SMTP_USER and SMTP_PASS in Railway Variables tab"
+        }), 500
+
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = "✅ MUHS Notifier — Test Email"
+        msg["From"]    = SMTP_USER
+        msg["To"]      = to
+        plain = (
+            "This is a test email from MUHS Result Notifier.\n\n"
+            "If you received this, email notifications are working correctly!\n\n"
+            f"SMTP: {SMTP_HOST}:{SMTP_PORT}\n"
+            f"From: {SMTP_USER}\n"
+            f"Sent at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+        html = f"""
+        <html><body style="font-family:Arial,sans-serif;padding:20px">
+        <h2 style="color:#2ecc71">✅ Test Email — MUHS Result Notifier</h2>
+        <p>Email notifications are working correctly!</p>
+        <table style="border-collapse:collapse;margin:16px 0;font-size:14px">
+          <tr><td style="padding:6px;color:#777">SMTP Host</td>
+              <td style="padding:6px"><b>{SMTP_HOST}:{SMTP_PORT}</b></td></tr>
+          <tr><td style="padding:6px;color:#777">From</td>
+              <td style="padding:6px"><b>{SMTP_USER}</b></td></tr>
+          <tr><td style="padding:6px;color:#777">Sent at</td>
+              <td style="padding:6px"><b>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</b></td></tr>
+        </table>
+        <p style="color:#888;font-size:12px">MUHS UG 2026 Result Notifier</p>
+        </body></html>
+        """
+        msg.attach(MIMEText(plain, "plain"))
+        msg.attach(MIMEText(html, "html"))
+
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASS)
+            server.sendmail(SMTP_USER, to, msg.as_string())
+
+        log.info("Test email sent to %s", to)
+        return jsonify({
+            "success": True,
+            "message": f"Test email sent to {to}. Check your inbox (and spam folder).",
+            "smtp": f"{SMTP_HOST}:{SMTP_PORT}",
+            "from": SMTP_USER
+        })
+
+    except smtplib.SMTPAuthenticationError:
+        log.error("SMTP auth failed for %s", SMTP_USER)
+        return jsonify({
+            "error": "Gmail authentication failed",
+            "cause": "Wrong App Password or 2-Step Verification not enabled",
+            "fix": "Generate a new App Password at myaccount.google.com/apppasswords"
+        }), 500
+    except Exception as exc:
+        log.error("Test email failed: %s", exc)
+        return jsonify({"error": str(exc)}), 500
 
 
 @app.route("/admin")
@@ -798,7 +883,21 @@ def start_background_poller() -> None:
     log.info("Background poller thread started.")
 
 
+def _log_startup_config() -> None:
+    log.info("=" * 60)
+    log.info("MUHS Result Notifier starting up")
+    log.info("SMTP_USER : %s", SMTP_USER or "*** NOT SET ***")
+    log.info("SMTP_PASS : %s", "*** SET ***" if SMTP_PASS else "*** NOT SET ***")
+    log.info("SMTP_HOST : %s:%s", SMTP_HOST, SMTP_PORT)
+    log.info("ADMIN_KEY : %s", "SET" if ADMIN_KEY != "muhs-admin" else "DEFAULT (change it!)")
+    log.info("DB_PATH   : %s", DB_PATH)
+    if not SMTP_USER or not SMTP_PASS:
+        log.error("⚠️  EMAIL WILL NOT WORK — set SMTP_USER and SMTP_PASS in Railway Variables!")
+    log.info("=" * 60)
+
+
 if __name__ == "__main__":
+    _log_startup_config()
     init_db()
     start_background_poller()
     log.info("Starting MUHS Result Notifier on port %d", PORT)
